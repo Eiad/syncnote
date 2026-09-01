@@ -188,9 +188,17 @@ const MediaShare = ({ documentId }) => {
       setDraggingOver(false);
     };
 
-    const swallow = (event) => event.preventDefault();
+    // Only file drags. Dragging selected text into the note textareas relies on
+    // the browser's default drop behaviour, so preventing it unconditionally
+    // would break editing elsewhere on the page.
+    const isFileDrag = (event) => event.dataTransfer?.types?.includes('Files');
+
+    const swallow = (event) => {
+      if (isFileDrag(event)) event.preventDefault();
+    };
 
     const swallowAndReset = (event) => {
+      if (!isFileDrag(event)) return;
       event.preventDefault();
       reset();
     };
