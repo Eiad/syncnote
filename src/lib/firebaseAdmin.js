@@ -62,8 +62,12 @@ export async function requireUser(req) {
     throw new HttpError(401, 'Missing authentication token');
   }
 
+  // Resolve the Admin SDK outside the try: a misconfigured service account must
+  // surface as a server error, not be reported to the caller as a bad token.
+  const auth = adminAuth();
+
   try {
-    return await adminAuth().verifyIdToken(token);
+    return await auth.verifyIdToken(token);
   } catch {
     throw new HttpError(401, 'Invalid authentication token');
   }
