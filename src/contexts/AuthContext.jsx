@@ -4,12 +4,13 @@ import { onAuthStateChanged } from 'firebase/auth';
 
 const AuthContext = createContext();
 
-// The main account signs in with a Firebase custom token minted by
-// /api/ash-login, so it holds a real session (and a real ID token) under this
-// uid rather than a client-side flag.
+// The main account signs in client-side and has no Firebase session. The server
+// recognises it by the signed session cookie /api/ash-login sets; this flag is
+// only what tells the UI which account is active.
 export const ASH_UID = 'ash';
 
 const ASH_PROFILE = {
+  uid: ASH_UID,
   displayName: 'Ash',
   email: 'ash@i-ash.com',
   photoURL: '/assets/ash-avatar.jpg'
@@ -21,30 +22,29 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        setUser(null);
+      // Check for Ash's login first
+      const isAshLoggedIn = localStorage.getItem('isAshLoggedIn');
+
+      if (isAshLoggedIn) {
+        setUser(ASH_PROFILE);
         setLoading(false);
         return;
       }
 
-      // Custom-token users have no provider entries and no verified email, so
-      // the verification gate below must not apply to them.
-      if (user.uid === ASH_UID) {
-        setUser({ ...user, ...ASH_PROFILE });
-        setLoading(false);
-        return;
-      }
-
-      const providerId = user.providerData?.[0]?.providerId;
-
-      if (user.emailVerified || providerId === 'google.com') {
-        setUser({
-          ...user,
-          photoURL: user.photoURL || '/assets/default-avatar.jpg'
-        });
+      if (user) {
+        // Check if user is verified or is a Google user
+        if (user.emailVerified || user.providerData?.[0]?.providerId === 'google.com') {
+          // Set default avatar if no photoURL exists
+          setUser({
+            ...user,
+            photoURL: user.photoURL || '/assets/default-avatar.jpg'
+          });
+        } else {
+          // If not verified, sign them out
+          await auth.signOut();
+          setUser(null);
+        }
       } else {
-        // Unverified email accounts are not allowed to stay signed in.
-        await auth.signOut();
         setUser(null);
       }
 

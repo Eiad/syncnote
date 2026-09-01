@@ -7,8 +7,8 @@ import ImageModal from './ImageModal';
 import { useAuth } from '@/contexts/AuthContext';
 import { FiImage, FiTrash2 } from 'react-icons/fi';
 import { authedFetch } from '@/lib/authedFetch';
-import { appendItem } from '@/lib/mediaDoc';
-import { itemsFromData } from '@/lib/mediaSchema';
+import { appendItem, removeItems } from '@/lib/mediaDoc';
+import { itemsFromData, matchesTarget } from '@/lib/mediaSchema';
 
 const CLOUD_NAME = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
 
@@ -158,8 +158,10 @@ const MediaShare = ({ documentId }) => {
   };
 
   /**
-   * Delete a single image from Cloudinary and this document.
-   * The API route owns both halves, so the two can no longer diverge.
+   * Delete a single image: destroy the Cloudinary asset first, then drop the
+   * record. A hard Cloudinary failure leaves both sides untouched and the
+   * action retryable; an asset that is already gone still clears its record,
+   * which is what unsticks entries whose asset was deleted long ago.
    */
   const handleDeleteItem = async (item, event) => {
     event?.stopPropagation();
@@ -181,13 +183,16 @@ const MediaShare = ({ documentId }) => {
 
     try {
       const data = await authedFetch('/api/deleteImage', {
-        collection: 'media',
-        documentId,
-        publicId: item.publicId,
-        url: item.url
+        publicId: item.publicId ?? null,
+        resourceType: item.resourceType
       });
 
-      if (data.cloudinary === 'skipped') {
+      const docRef = doc(db, `users/${user.uid}/media`, documentId);
+      await removeItems(docRef, 'media', (candidate) =>
+        matchesTarget(candidate, { publicId: item.publicId, url: item.url })
+      );
+
+      if (data.status === 'skipped') {
         setError('Image removed, but its Cloudinary ID could not be determined, so the original file may remain.');
       }
 
@@ -197,7 +202,7 @@ const MediaShare = ({ documentId }) => {
       logAnalyticsEvent('media_delete_single_success', {
         user_id: user?.uid,                   // User identifier
         document_id: documentId,              // Target document
-        cloudinary_result: data.cloudinary    // 'deleted', 'missing' or 'skipped'
+        cloudinary_result: data.status        // 'deleted', 'missing' or 'skipped'
       });
     } catch (err) {
       setError('Error deleting image: ' + err.message);
@@ -233,15 +238,29 @@ const MediaShare = ({ documentId }) => {
     });
 
     try {
-      // Every asset is attempted independently server-side and the survivors
-      // are written back, so one bad asset can no longer strand the rest.
-      const data = await authedFetch('/api/deleteAll', {
-        collection: 'media',
-        documentId
+      // Every asset is attempted independently, and only the ones that are
+      // actually gone from Cloudinary have their records cleared. One bad asset
+      // can no longer strand the rest.
+      const { results } = await authedFetch('/api/deleteAll', {
+        items: items.map(({ publicId, resourceType, url }) => ({
+          publicId: publicId ?? null,
+          resourceType,
+          url
+        }))
       });
 
-      if (data.failed?.length) {
-        setError(`${data.failed.length} image(s) could not be deleted from Cloudinary and were kept.`);
+      const cleared = new Set(
+        results.filter((result) => result.status !== 'failed').map((result) => result.publicId || result.url)
+      );
+
+      const docRef = doc(db, `users/${user.uid}/media`, documentId);
+      const removed = await removeItems(docRef, 'media', (candidate) =>
+        cleared.has(candidate.publicId || candidate.url)
+      );
+
+      const failed = results.filter((result) => result.status === 'failed');
+      if (failed.length) {
+        setError(`${failed.length} image(s) could not be deleted from Cloudinary and were kept.`);
       }
 
       setSelectedItem(null);
@@ -250,7 +269,7 @@ const MediaShare = ({ documentId }) => {
       logAnalyticsEvent('media_delete_all_success', {
         user_id: user?.uid,                   // User identifier
         document_id: documentId,              // Target document
-        deleted_count: data.deleted           // Number of images deleted
+        deleted_count: removed                // Number of images deleted
       });
     } catch (err) {
       setError('Error deleting images: ' + err.message);

@@ -1,14 +1,15 @@
-import { requireUser, sendError } from '@/lib/firebaseAdmin';
-import { resolveDoc, readItems, destroyAsset, removeItems } from '@/lib/mediaStore';
+import { requireCaller, HttpError, sendError } from '@/lib/serverAuth';
+import { destroyAsset } from '@/lib/mediaStore';
 
-const entryKey = (item) => item.publicId || item.url;
+const MAX_ITEMS = 200;
 
 /**
- * Delete every Cloudinary-backed entry in a user's media or files document.
+ * Destroy a batch of Cloudinary assets on behalf of an authenticated caller.
  *
- * Each asset is attempted independently and the survivors are always written
- * back, so one failing asset can no longer abort the batch and strand the
- * document in a state the UI cannot clear.
+ * Each asset is attempted independently and reported on individually, so one
+ * failing asset can no longer abort the batch. The client clears the records
+ * that succeeded and keeps the rest, which is what stops a single bad asset
+ * from leaving a document nothing can clear.
  */
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -16,43 +17,29 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { uid } = await requireUser(req);
-    const { collection, documentId } = req.body || {};
+    await requireCaller(req);
 
-    const docRef = resolveDoc(uid, collection, documentId);
-    const snapshot = await docRef.get();
-    const items = readItems(snapshot, collection);
+    const { items } = req.body || {};
 
-    if (items.length === 0) {
-      return res.status(200).json({ deleted: 0, failed: [] });
+    if (!Array.isArray(items)) {
+      throw new HttpError(400, 'items must be an array');
+    }
+    if (items.length > MAX_ITEMS) {
+      throw new HttpError(400, `Too many items (limit ${MAX_ITEMS})`);
     }
 
     const outcomes = await Promise.allSettled(
-      items.map((item) => destroyAsset(item.publicId, item.resourceType))
+      items.map((item) => destroyAsset(item?.publicId, item?.resourceType))
     );
 
-    const clearable = new Set();
-    const failed = [];
+    const results = outcomes.map((outcome, index) => ({
+      publicId: items[index]?.publicId ?? null,
+      url: items[index]?.url ?? null,
+      status: outcome.status === 'fulfilled' ? outcome.value : 'failed',
+      reason: outcome.status === 'rejected' ? outcome.reason?.message : undefined
+    }));
 
-    outcomes.forEach((outcome, index) => {
-      const item = items[index];
-
-      if (outcome.status === 'fulfilled') {
-        clearable.add(entryKey(item));
-      } else {
-        failed.push({
-          publicId: item.publicId,
-          url: item.url,
-          reason: outcome.reason?.message || 'Unknown error'
-        });
-      }
-    });
-
-    const removed = await removeItems(docRef, collection, (item) =>
-      clearable.has(entryKey(item))
-    );
-
-    return res.status(200).json({ deleted: removed, failed });
+    return res.status(200).json({ results });
   } catch (error) {
     return sendError(res, error, 'Delete all error');
   }

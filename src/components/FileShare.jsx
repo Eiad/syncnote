@@ -6,8 +6,8 @@ import styles from './FileShare.module.scss';
 import { useAuth } from '@/contexts/AuthContext';
 import { FiUpload, FiTrash2, FiFileText } from 'react-icons/fi';
 import { authedFetch } from '@/lib/authedFetch';
-import { appendItem } from '@/lib/mediaDoc';
-import { itemsFromData } from '@/lib/mediaSchema';
+import { appendItem, removeItems } from '@/lib/mediaDoc';
+import { itemsFromData, matchesTarget } from '@/lib/mediaSchema';
 
 const CLOUD_NAME = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
 
@@ -69,13 +69,16 @@ const FileShare = ({ documentId }) => {
 
         try {
             const data = await authedFetch('/api/deleteImage', {
-                collection: 'files',
-                documentId,
-                publicId: item.publicId,
-                url: item.url
+                publicId: item.publicId ?? null,
+                resourceType: item.resourceType
             });
 
-            if (data.cloudinary === 'skipped') {
+            const docRef = doc(db, `users/${user.uid}/files`, documentId);
+            await removeItems(docRef, 'files', (candidate) =>
+                matchesTarget(candidate, { publicId: item.publicId, url: item.url })
+            );
+
+            if (data.status === 'skipped') {
                 setError('File removed, but its Cloudinary ID could not be determined, so the original may remain.');
             }
         } catch (err) {
@@ -95,14 +98,28 @@ const FileShare = ({ documentId }) => {
 
         try {
             // Previously this only cleared Firestore, orphaning every raw asset
-            // on Cloudinary. The endpoint now removes both.
-            const data = await authedFetch('/api/deleteAll', {
-                collection: 'files',
-                documentId
+            // on Cloudinary. Each asset is now destroyed first, and only the
+            // ones confirmed gone have their records cleared.
+            const { results } = await authedFetch('/api/deleteAll', {
+                items: items.map(({ publicId, resourceType, url }) => ({
+                    publicId: publicId ?? null,
+                    resourceType,
+                    url
+                }))
             });
 
-            if (data.failed?.length) {
-                setError(`${data.failed.length} file(s) could not be deleted from Cloudinary and were kept.`);
+            const cleared = new Set(
+                results.filter((result) => result.status !== 'failed').map((result) => result.publicId || result.url)
+            );
+
+            const docRef = doc(db, `users/${user.uid}/files`, documentId);
+            await removeItems(docRef, 'files', (candidate) =>
+                cleared.has(candidate.publicId || candidate.url)
+            );
+
+            const failed = results.filter((result) => result.status === 'failed');
+            if (failed.length) {
+                setError(`${failed.length} file(s) could not be deleted from Cloudinary and were kept.`);
             }
         } catch (err) {
             setError('Error deleting files: ' + err.message);

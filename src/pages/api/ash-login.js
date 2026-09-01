@@ -1,9 +1,5 @@
 import { timingSafeEqual } from 'crypto';
-import { adminAuth, HttpError, sendError } from '@/lib/firebaseAdmin';
-
-// The uid the Ash account has always used. Minting the custom token with this
-// exact uid keeps every existing document under users/ash/** reachable.
-const ASH_UID = 'ash';
+import { HttpError, sendError, buildSessionCookie } from '@/lib/serverAuth';
 
 const WINDOW_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
@@ -12,6 +8,14 @@ const MAX_ATTEMPTS = 10;
 // casual guesser rather than acting as a hard rate limit.
 const attempts = new Map();
 
+/**
+ * Check the main account's password server-side and issue a signed session
+ * cookie.
+ *
+ * The password check lives here rather than in the browser so it is not inlined
+ * into the client bundle. The cookie is what lets the Cloudinary routes tell
+ * this account apart from an anonymous caller.
+ */
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ message: 'Method not allowed' });
@@ -41,8 +45,8 @@ export default async function handler(req, res) {
 
     attempts.delete(ip);
 
-    const token = await adminAuth().createCustomToken(ASH_UID);
-    return res.status(200).json({ token });
+    res.setHeader('Set-Cookie', buildSessionCookie());
+    return res.status(200).json({ ok: true });
   } catch (error) {
     return sendError(res, error, 'Ash login error');
   }

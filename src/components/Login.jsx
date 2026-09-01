@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import { auth, logAnalyticsEvent } from '@/lib/firebase';
-import { signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, signInWithCustomToken, sendPasswordResetEmail } from 'firebase/auth';
+import { signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
 import { FiMail, FiLock } from 'react-icons/fi';
 import { FcGoogle } from 'react-icons/fc';
 import styles from './Login.module.scss';
@@ -49,9 +49,9 @@ const Login = () => {
     });
 
     try {
-      // The password is checked server-side, which then mints a Firebase custom
-      // token. That gives this account a real session and an ID token the
-      // authenticated API routes can verify.
+      // The password is checked server-side so it is never inlined into the
+      // client bundle. A successful check sets the signed session cookie the
+      // Cloudinary routes authenticate against.
       const response = await fetch('/api/ash-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -72,7 +72,7 @@ const Login = () => {
         return;
       }
 
-      await signInWithCustomToken(auth, data.token);
+      localStorage.setItem('isAshLoggedIn', 'true');
 
       // Track successful Ash login for admin access monitoring
       logAnalyticsEvent('login_success', {

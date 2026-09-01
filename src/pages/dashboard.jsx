@@ -63,6 +63,10 @@ const Dashboard = () => {
     try {
       // console.log('🔐 Signing out from Firebase...');
       await auth.signOut();
+      localStorage.removeItem('isAshLoggedIn');
+      // Drop the server-side session cookie too, so the browser stops
+      // presenting a credential the user has signed out of.
+      await fetch('/api/ash-logout', { method: 'POST' }).catch(() => {});
 
       // Ensure minimum loading time for better UX
       const elapsedTime = Date.now() - startTime;

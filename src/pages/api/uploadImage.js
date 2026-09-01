@@ -1,5 +1,5 @@
 import formidable from 'formidable';
-import { requireUser, sendError } from '@/lib/firebaseAdmin';
+import { requireCaller, sendError } from '@/lib/serverAuth';
 import { cloudinary } from '@/lib/mediaStore';
 
 export const config = {
@@ -16,7 +16,7 @@ export default async function handler(req, res) {
   try {
     // Uploads are billed to our Cloudinary account, so the caller must be a
     // signed-in user rather than anyone who finds the endpoint.
-    await requireUser(req);
+    await requireCaller(req);
 
     const form = formidable({
       maxFileSize: 10 * 1024 * 1024 // 10MB

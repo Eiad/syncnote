@@ -35,3 +35,30 @@ export async function appendItem(docRef, collection, entry) {
     return next.length;
   });
 }
+
+/**
+ * Remove every entry matched by `shouldRemove`, and retire the legacy field in
+ * the same write.
+ *
+ * Called only after the Cloudinary asset is confirmed gone, so the record and
+ * the asset cannot diverge. Transactional for the same reason as appendItem.
+ *
+ * @returns {Promise<number>} How many entries were removed.
+ */
+export async function removeItems(docRef, collection, shouldRemove) {
+  const { legacyField } = COLLECTIONS[collection];
+
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(docRef);
+    const items = itemsFromData(snapshot.exists() ? snapshot.data() : null, collection);
+    const remaining = items.filter((item) => !shouldRemove(item));
+
+    transaction.set(
+      docRef,
+      { items: remaining, [legacyField]: deleteField() },
+      { merge: true }
+    );
+
+    return items.length - remaining.length;
+  });
+}

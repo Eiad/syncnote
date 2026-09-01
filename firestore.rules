@@ -3,36 +3,46 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Everything lives under the owning user's tree. The main account signs in
-    // with a custom token whose uid is 'ash', so it is covered by the same
-    // owner check as every other account and needs no carve-out.
     match /users/{userId} {
       function isOwner() {
         return request.auth != null && request.auth.uid == userId;
       }
 
-      allow read, update, delete: if isOwner();
+      // The main account signs in client-side and holds no Firebase session,
+      // so rules cannot identify it and its tree stays open. This is a known
+      // tradeoff of that login: closing it requires 'ash' to hold a real
+      // Firebase session. Every other account is owner-only.
+      function isAshTree() {
+        return userId == 'ash';
+      }
 
-      allow create: if isOwner() &&
+      function isPermitted() {
+        return isOwner() || isAshTree();
+      }
+
+      allow read, update, delete: if isPermitted();
+
+      allow create: if isAshTree() || (
+                      isOwner() &&
                       request.resource.data.keys().hasAll(['name', 'email', 'createdAt', 'provider']) &&
                       request.resource.data.name is string &&
                       request.resource.data.email is string &&
-                      request.resource.data.provider is string;
+                      request.resource.data.provider is string);
 
       match /texts/{document=**} {
-        allow read, write: if isOwner();
+        allow read, write: if isPermitted();
       }
 
       match /quicknotes/{document=**} {
-        allow read, write: if isOwner();
+        allow read, write: if isPermitted();
       }
 
       match /media/{document=**} {
-        allow read, write: if isOwner();
+        allow read, write: if isPermitted();
       }
 
       match /files/{document=**} {
-        allow read, write: if isOwner();
+        allow read, write: if isPermitted();
       }
     }
   }
