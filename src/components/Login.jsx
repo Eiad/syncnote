@@ -49,29 +49,39 @@ const Login = () => {
     });
 
     try {
-      if (ashPassword === process.env.NEXT_PUBLIC_ASH_PASSWORD) {
-        // console.log('✅ Ash password correct, logging in...');
-        localStorage.setItem('isAshLoggedIn', 'true');
-        
-        // Track successful Ash login for admin access monitoring
-        logAnalyticsEvent('login_success', {
-          login_method: 'ash',                // Special login method
-          user_email: 'ash@syncnote.com'     // Fixed email for Ash user
-        });
-        
-        // console.log('🚀 Redirecting to dashboard...');
-        window.location.href = '/dashboard';
-      } else {
-        // console.log('❌ Ash password incorrect');
-        setError('Invalid password');
-        
+      // The password is checked server-side so it is never inlined into the
+      // client bundle. A successful check sets the signed session cookie the
+      // Cloudinary routes authenticate against.
+      const response = await fetch('/api/ash-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: ashPassword })
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        setError(data.message || 'Invalid password');
+
         // Track failed Ash login attempts for security monitoring
         logAnalyticsEvent('login_failed', {
           login_method: 'ash',                // Special login method
           error_type: 'invalid_password',     // Type of failure
           user_email: 'ash@syncnote.com'     // Fixed email for Ash user
         });
+        return;
       }
+
+      localStorage.setItem('isAshLoggedIn', 'true');
+
+      // Track successful Ash login for admin access monitoring
+      logAnalyticsEvent('login_success', {
+        login_method: 'ash',                // Special login method
+        user_email: 'ash@syncnote.com'     // Fixed email for Ash user
+      });
+
+      // console.log('🚀 Redirecting to dashboard...');
+      window.location.href = '/dashboard';
     } catch (error) {
       // console.log('💥 Ash login error:', error);
       setError('Login failed: ' + error.message);

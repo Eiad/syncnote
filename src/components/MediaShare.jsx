@@ -1,19 +1,28 @@
 import { useState, useEffect, useCallback } from 'react';
 import { db, logAnalyticsEvent } from '@/lib/firebase';
-import { doc, setDoc, onSnapshot, getDoc } from 'firebase/firestore';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { CldUploadWidget } from 'next-cloudinary';
 import styles from './MediaShare.module.scss';
 import ImageModal from './ImageModal';
 import { useAuth } from '@/contexts/AuthContext';
 import { FiImage, FiTrash2 } from 'react-icons/fi';
+import { authedFetch } from '@/lib/authedFetch';
+import { appendItem, removeItems } from '@/lib/mediaDoc';
+import { itemsFromData, matchesTarget } from '@/lib/mediaSchema';
+
+const CLOUD_NAME = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+
+// Stable identity for a stored entry. Legacy records with an underivable public
+// ID fall back to their URL so they can still be selected and removed.
+const itemKey = (item) => item.publicId || item.url;
 
 const MediaShare = ({ documentId }) => {
   const { user } = useAuth();
-  const [mediaUrls, setMediaUrls] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState([]);
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState(false);
-  const [selectedImage, setSelectedImage] = useState(null);
+  const [deletingKeys, setDeletingKeys] = useState([]);
+  const [selectedItem, setSelectedItem] = useState(null);
   const [pasteLoading, setPasteLoading] = useState(false);
 
   /**
@@ -22,12 +31,12 @@ const MediaShare = ({ documentId }) => {
    * Supports drag-and-drop and clipboard paste functionality
    */
   const handlePaste = useCallback(async (event) => {
-    const items = event.clipboardData?.items;
-    if (!items || !user) return;
+    const clipboardItems = event.clipboardData?.items;
+    if (!clipboardItems || !user) return;
 
-    for (const item of items) {
-      if (item.type.indexOf('image') === 0) {
-        const file = item.getAsFile();
+    for (const clipboardItem of clipboardItems) {
+      if (clipboardItem.type.indexOf('image') === 0) {
+        const file = clipboardItem.getAsFile();
         if (!file) continue;
 
         setPasteLoading(true);
@@ -43,25 +52,16 @@ const MediaShare = ({ documentId }) => {
         });
 
         try {
-          const response = await fetch('/api/uploadImage', {
-            method: 'POST',
-            body: formData,
-          });
-
-          if (!response.ok) {
-            throw new Error('Failed to upload pasted image');
-          }
-
-          const data = await response.json();
-          const imageUrl = data.secure_url;
+          const data = await authedFetch('/api/uploadImage', formData);
 
           const docRef = doc(db, `users/${user.uid}/media`, documentId);
-          const docSnap = await getDoc(docRef);
-          const currentUrls = docSnap.exists() ? docSnap.data().urls || [] : [];
-
-          await setDoc(docRef, {
-            urls: [...currentUrls, imageUrl]
-          }, { merge: true });
+          const total = await appendItem(docRef, 'media', {
+            url: data.secure_url,
+            // Persisting the public ID is what makes deletion reliable later.
+            publicId: data.public_id,
+            resourceType: data.resource_type || 'image',
+            uploadedAt: Date.now()
+          });
 
           // Track successful paste uploads for feature usage analysis
           logAnalyticsEvent('media_paste_upload_success', {
@@ -69,11 +69,11 @@ const MediaShare = ({ documentId }) => {
             file_type: file.type,              // File type for format analysis
             user_id: user.uid,                 // User identifier
             document_id: documentId,           // Target document
-            total_images: currentUrls.length + 1 // Total images in collection
+            total_images: total                // Total images in collection
           });
         } catch (err) {
           setError('Error uploading pasted image: ' + err.message);
-          
+
           // Track paste upload errors to identify upload issues
           logAnalyticsEvent('media_paste_upload_error', {
             error_message: err.message,        // Specific error message
@@ -104,19 +104,18 @@ const MediaShare = ({ documentId }) => {
 
     const docRef = doc(db, `users/${user.uid}/media`, documentId);
 
-    const unsubscribe = onSnapshot(docRef, (doc) => {
-      if (doc.exists()) {
-        const urls = doc.data().urls || [];
-        setMediaUrls(urls);
-        
-        // Track media loading to understand content access patterns
-        if (urls.length > 0) {
-          logAnalyticsEvent('media_loaded', {
-            user_id: user.uid,                 // User identifier
-            document_id: documentId,           // Which document was loaded
-            image_count: urls.length           // Number of images loaded
-          });
-        }
+    const unsubscribe = onSnapshot(docRef, (snapshot) => {
+      // Reads the current shape and older URL-only documents alike.
+      const nextItems = snapshot.exists() ? itemsFromData(snapshot.data(), 'media') : [];
+      setItems(nextItems);
+
+      // Track media loading to understand content access patterns
+      if (nextItems.length > 0) {
+        logAnalyticsEvent('media_loaded', {
+          user_id: user.uid,                 // User identifier
+          document_id: documentId,           // Which document was loaded
+          image_count: nextItems.length      // Number of images loaded
+        });
       }
     });
 
@@ -129,14 +128,13 @@ const MediaShare = ({ documentId }) => {
    */
   const handleUploadSuccess = async (result) => {
     try {
-      const imageUrl = result.info.secure_url;
       const docRef = doc(db, `users/${user.uid}/media`, documentId);
-      const docSnap = await getDoc(docRef);
-      const currentUrls = docSnap.exists() ? docSnap.data().urls || [] : [];
-
-      await setDoc(docRef, {
-        urls: [...currentUrls, imageUrl]
-      }, { merge: true });
+      const total = await appendItem(docRef, 'media', {
+        url: result.info.secure_url,
+        publicId: result.info.public_id,
+        resourceType: result.info.resource_type || 'image',
+        uploadedAt: Date.now()
+      });
 
       // Track successful widget uploads for feature usage analysis
       logAnalyticsEvent('media_upload_success', {
@@ -144,18 +142,79 @@ const MediaShare = ({ documentId }) => {
         document_id: documentId,              // Target document
         file_size: result.info.bytes,         // File size in bytes
         file_format: result.info.format,      // File format (jpg, png, etc.)
-        total_images: currentUrls.length + 1, // Total images in collection
+        total_images: total,                  // Total images in collection
         upload_method: 'widget'               // Indicates widget upload method
       });
     } catch (err) {
       setError('Error saving image: ' + err.message);
-      
+
       // Track upload errors to identify widget issues
       logAnalyticsEvent('media_upload_error', {
         error_message: err.message,           // Specific error message
         user_id: user.uid,                    // User identifier for support
         document_id: documentId               // Target document
       });
+    }
+  };
+
+  /**
+   * Delete a single image: destroy the Cloudinary asset first, then drop the
+   * record. A hard Cloudinary failure leaves both sides untouched and the
+   * action retryable; an asset that is already gone still clears its record,
+   * which is what unsticks entries whose asset was deleted long ago.
+   */
+  const handleDeleteItem = async (item, event) => {
+    event?.stopPropagation();
+
+    if (!window.confirm('Delete this image? This cannot be undone.')) {
+      return;
+    }
+
+    const key = itemKey(item);
+    setDeletingKeys((keys) => [...keys, key]);
+    setError(null);
+
+    // Track single deletions to understand how media is curated
+    logAnalyticsEvent('media_delete_single_started', {
+      user_id: user?.uid,                     // User identifier
+      document_id: documentId,                // Target document
+      image_count: items.length               // Collection size before deletion
+    });
+
+    try {
+      const data = await authedFetch('/api/deleteImage', {
+        publicId: item.publicId ?? null,
+        resourceType: item.resourceType
+      });
+
+      const docRef = doc(db, `users/${user.uid}/media`, documentId);
+      await removeItems(docRef, 'media', (candidate) =>
+        matchesTarget(candidate, { publicId: item.publicId, url: item.url })
+      );
+
+      if (data.status === 'skipped') {
+        setError('Image removed, but its Cloudinary ID could not be determined, so the original file may remain.');
+      }
+
+      setSelectedItem((current) => (current && itemKey(current) === key ? null : current));
+
+      // Track successful single deletions
+      logAnalyticsEvent('media_delete_single_success', {
+        user_id: user?.uid,                   // User identifier
+        document_id: documentId,              // Target document
+        cloudinary_result: data.status        // 'deleted', 'missing' or 'skipped'
+      });
+    } catch (err) {
+      setError('Error deleting image: ' + err.message);
+
+      // Track single deletion errors to identify cleanup issues
+      logAnalyticsEvent('media_delete_single_error', {
+        error_message: err.message,           // Specific error message
+        user_id: user?.uid,                   // User identifier for support
+        document_id: documentId               // Target document
+      });
+    } finally {
+      setDeletingKeys((keys) => keys.filter((existing) => existing !== key));
     }
   };
 
@@ -175,55 +234,52 @@ const MediaShare = ({ documentId }) => {
     logAnalyticsEvent('media_delete_all_started', {
       user_id: user?.uid,                     // User identifier
       document_id: documentId,                // Target document
-      image_count: mediaUrls.length           // Number of images to delete
+      image_count: items.length               // Number of images to delete
     });
 
     try {
-      // Delete from Cloudinary
-      for (const url of mediaUrls) {
-        // Extract public ID from Cloudinary URL
-        // Example URL: https://res.cloudinary.com/drkarc7oe/image/upload/v1234567890/folder/image.jpg
-        const matches = url.match(/\/v\d+\/(.+)\./);
-        if (!matches || !matches[1]) {
-          console.error('Could not extract public ID from URL:', url);
-          continue;
-        }
-        const publicId = matches[1];
+      // Every asset is attempted independently, and only the ones that are
+      // actually gone from Cloudinary have their records cleared. One bad asset
+      // can no longer strand the rest.
+      const { results } = await authedFetch('/api/deleteAll', {
+        items: items.map(({ publicId, resourceType, url }) => ({
+          publicId: publicId ?? null,
+          resourceType,
+          url
+        }))
+      });
 
-        const response = await fetch('/api/deleteImage', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ publicId }),
-        });
+      const cleared = new Set(
+        results.filter((result) => result.status !== 'failed').map((result) => result.publicId || result.url)
+      );
 
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || 'Failed to delete image from Cloudinary');
-        }
+      const docRef = doc(db, `users/${user.uid}/media`, documentId);
+      const removed = await removeItems(docRef, 'media', (candidate) =>
+        cleared.has(candidate.publicId || candidate.url)
+      );
+
+      const failed = results.filter((result) => result.status === 'failed');
+      if (failed.length) {
+        setError(`${failed.length} image(s) could not be deleted from Cloudinary and were kept.`);
       }
 
-      // Clear Firebase storage
-      const docRef = doc(db, `users/${user.uid}/media`, documentId);
-      await setDoc(docRef, { urls: [] }, { merge: true });
+      setSelectedItem(null);
 
       // Track successful bulk deletions
       logAnalyticsEvent('media_delete_all_success', {
         user_id: user?.uid,                   // User identifier
         document_id: documentId,              // Target document
-        deleted_count: mediaUrls.length       // Number of images deleted
+        deleted_count: removed                // Number of images deleted
       });
-
     } catch (err) {
       setError('Error deleting images: ' + err.message);
-      
+
       // Track deletion errors to identify cleanup issues
       logAnalyticsEvent('media_delete_all_error', {
         error_message: err.message,           // Specific error message
         user_id: user?.uid,                   // User identifier for support
         document_id: documentId,              // Target document
-        image_count: mediaUrls.length         // Number of images that failed to delete
+        image_count: items.length             // Number of images that failed to delete
       });
     } finally {
       setDeleting(false);
@@ -234,21 +290,21 @@ const MediaShare = ({ documentId }) => {
    * Handle image viewing with analytics tracking
    * Tracks which images users view for content engagement analysis
    */
-  const handleImageClick = (imageUrl) => {
-    setSelectedImage(imageUrl);
-    
+  const handleImageClick = (item) => {
+    setSelectedItem(item);
+
     // Track image views to understand content engagement
     logAnalyticsEvent('media_image_viewed', {
       user_id: user?.uid,                     // User identifier
       document_id: documentId,                // Target document
-      image_index: mediaUrls.indexOf(imageUrl), // Position of image in collection
-      total_images: mediaUrls.length          // Total number of images available
+      image_index: items.indexOf(item),       // Position of image in collection
+      total_images: items.length              // Total number of images available
     });
   };
 
   return (
     <div className={styles.container}>
-      {mediaUrls.length > 0 && (
+      {items.length > 0 && (
         <div className={styles.header}>
 
           <button
@@ -270,29 +326,46 @@ const MediaShare = ({ documentId }) => {
       )}
 
       <div className={styles.imageGrid}>
-        {mediaUrls.map((url, index) => (
-          <div
-            key={index}
-            className={styles.imageWrapper}
-            onClick={() => handleImageClick(url)}
-          >
-            <img src={url} alt={`Shared media ${index + 1}`} />
-            <div className={styles.imageOverlay}>
-              <span>Click to view</span>
+        {items.map((item, index) => {
+          const key = itemKey(item);
+          const isDeleting = deletingKeys.includes(key);
+
+          return (
+            <div
+              key={key || index}
+              className={styles.imageWrapper}
+              onClick={() => handleImageClick(item)}
+            >
+              <img src={item.url} alt={`Shared media ${index + 1}`} />
+              <div className={styles.imageOverlay}>
+                <span>Click to view</span>
+              </div>
+              <button
+                className={styles.imageDeleteButton}
+                onClick={(event) => handleDeleteItem(item, event)}
+                disabled={isDeleting || deleting}
+                title="Delete this image"
+                aria-label={`Delete image ${index + 1}`}
+              >
+                <FiTrash2 />
+              </button>
+              {isDeleting && <div className={styles.itemDeleting}>Deleting...</div>}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
-      {selectedImage && (
+      {selectedItem && (
         <ImageModal
-          imageUrl={selectedImage}
-          onClose={() => setSelectedImage(null)}
+          imageUrl={selectedItem.url}
+          onClose={() => setSelectedItem(null)}
+          onDelete={(event) => handleDeleteItem(selectedItem, event)}
+          deleting={deletingKeys.includes(itemKey(selectedItem))}
         />
       )}
 
       <div className={styles.uploadButtonContainer}>
         <CldUploadWidget
-          cloudName="drkarc7oe"
+          cloudName={CLOUD_NAME}
           uploadPreset="syncnote"
           onSuccess={handleUploadSuccess}
           options={{
@@ -325,11 +398,11 @@ const MediaShare = ({ documentId }) => {
           }}
         >
           {({ open }) => (
-            <button 
-              className={styles.uploadButton} 
+            <button
+              className={styles.uploadButton}
               onClick={() => {
                 open();
-                
+
                 // Track widget opens to understand upload method preferences
                 logAnalyticsEvent('media_upload_widget_opened', {
                   user_id: user?.uid,          // User identifier
@@ -344,7 +417,6 @@ const MediaShare = ({ documentId }) => {
         </CldUploadWidget>
       </div>
 
-      {loading && <div className={styles.loading}>Uploading media...</div>}
       {error && <div className={styles.error}>{error}</div>}
       <div className={styles.instructions}>
         You can also paste images directly (Ctrl/Cmd + V)

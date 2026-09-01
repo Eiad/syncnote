@@ -2,39 +2,48 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
     match /users/{userId} {
-      allow create: if request.auth != null && request.auth.uid == userId;
-      allow read, write: if request.auth != null && (request.auth.uid == userId || userId == 'ash');
-      
-      allow create: if request.resource.data.keys().hasAll(['name', 'email', 'createdAt', 'provider']) &&
+      function isOwner() {
+        return request.auth != null && request.auth.uid == userId;
+      }
+
+      // The main account signs in client-side and holds no Firebase session,
+      // so rules cannot identify it and its tree stays open. This is a known
+      // tradeoff of that login: closing it requires 'ash' to hold a real
+      // Firebase session. Every other account is owner-only.
+      function isAshTree() {
+        return userId == 'ash';
+      }
+
+      function isPermitted() {
+        return isOwner() || isAshTree();
+      }
+
+      allow read, update, delete: if isPermitted();
+
+      allow create: if isAshTree() || (
+                      isOwner() &&
+                      request.resource.data.keys().hasAll(['name', 'email', 'createdAt', 'provider']) &&
                       request.resource.data.name is string &&
                       request.resource.data.email is string &&
-                      request.resource.data.provider is string;
-      
+                      request.resource.data.provider is string);
+
       match /texts/{document=**} {
-        allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
+        allow read, write: if isPermitted();
       }
-      
+
       match /quicknotes/{document=**} {
-        allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
+        allow read, write: if isPermitted();
       }
-      
+
       match /media/{document=**} {
-        allow read, write: if request.auth != null || request.auth == null;
+        allow read, write: if isPermitted();
+      }
+
+      match /files/{document=**} {
+        allow read, write: if isPermitted();
       }
     }
-    
-    match /media/{document=**} {
-      allow read, write: if request.auth != null || request.auth == null;
-    }
-
-    match /files/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
-    }  
-
-    match /users/{userId}/files/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
-    }    
-      
   }
 }
