@@ -67,6 +67,7 @@ const MediaShare = ({ documentId }) => {
     if (!accepted.length) return;
 
     setUploading({ done: 0, total: accepted.length });
+    const failures = [];
 
     try {
       for (const [index, file] of accepted.entries()) {
@@ -81,11 +82,14 @@ const MediaShare = ({ documentId }) => {
           upload_method: method               // 'paste' or 'drag_drop'
         });
 
+        let uploaded = null;
+
         try {
           const formData = new FormData();
           formData.append('file', file);
 
-          const data = await authedFetch('/api/uploadImage', formData);
+          uploaded = await authedFetch('/api/uploadImage', formData);
+          const data = uploaded;
 
           const docRef = doc(db, `users/${user.uid}/media`, documentId);
           const total = await appendItem(docRef, 'media', {
@@ -106,8 +110,21 @@ const MediaShare = ({ documentId }) => {
             upload_method: method              // 'paste' or 'drag_drop'
           });
         } catch (err) {
-          // One bad file must not abandon the rest of the batch.
-          setError(`Error uploading ${file.name || 'image'}: ${err.message}`);
+          // The asset can reach Cloudinary and still fail to be recorded. Undo
+          // the upload rather than leaving an asset nothing references, which is
+          // exactly the orphan this feature exists to prevent.
+          if (uploaded?.public_id) {
+            await authedFetch('/api/deleteImage', {
+              publicId: uploaded.public_id,
+              resourceType: uploaded.resource_type
+            }).catch(() => {
+              // Nothing more to try; the message below still reports the failure.
+            });
+          }
+
+          // One bad file must not abandon the rest of the batch. Collect the
+          // failures so a later one cannot hide an earlier one.
+          failures.push(`${file.name || 'image'}: ${err.message}`);
 
           // Track upload errors to identify upload issues
           logAnalyticsEvent(`${eventPrefix}_error`, {
@@ -122,6 +139,12 @@ const MediaShare = ({ documentId }) => {
       }
     } finally {
       setUploading(null);
+
+      if (failures.length === 1) {
+        setError([...problems, `Error uploading ${failures[0]}`].join('. '));
+      } else if (failures.length > 1) {
+        setError([...problems, `${failures.length} uploads failed - ${failures.join('; ')}`].join('. '));
+      }
     }
   }, [user, documentId]);
 
