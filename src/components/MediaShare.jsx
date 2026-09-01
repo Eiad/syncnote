@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { db, logAnalyticsEvent } from '@/lib/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { CldUploadWidget } from 'next-cloudinary';
@@ -9,6 +9,7 @@ import { FiImage, FiTrash2, FiUploadCloud } from 'react-icons/fi';
 import { authedFetch } from '@/lib/authedFetch';
 import { appendItem, removeItems } from '@/lib/mediaDoc';
 import { itemsFromData, matchesTarget } from '@/lib/mediaSchema';
+import { useFileDrop } from '@/lib/useFileDrop';
 
 const CLOUD_NAME = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
 
@@ -29,12 +30,6 @@ const MediaShare = ({ documentId }) => {
   const [selectedItem, setSelectedItem] = useState(null);
   // { done, total } while an upload batch is in flight, otherwise null.
   const [uploading, setUploading] = useState(null);
-  const [draggingOver, setDraggingOver] = useState(false);
-
-  // dragenter/dragleave fire for every child element the pointer crosses, so
-  // track nesting depth. Toggling a boolean per event makes the overlay flicker
-  // as the pointer moves over the image grid.
-  const dragDepth = useRef(0);
 
   /**
    * Upload image files and record each one.
@@ -166,82 +161,9 @@ const MediaShare = ({ documentId }) => {
     }
   }, [user, uploadFiles]);
 
-  /* ----------------------------------------------------------- drag and drop */
-
-  const handleDragEnter = (event) => {
-    if (!event.dataTransfer?.types?.includes('Files')) return;
-    event.preventDefault();
-    dragDepth.current += 1;
-    setDraggingOver(true);
-  };
-
-  // Without preventDefault on dragover the drop event never fires and the
-  // browser navigates to the dropped file instead.
-  const handleDragOver = (event) => {
-    if (!event.dataTransfer?.types?.includes('Files')) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'copy';
-  };
-
-  const handleDragLeave = () => {
-    dragDepth.current = Math.max(0, dragDepth.current - 1);
-    if (dragDepth.current === 0) setDraggingOver(false);
-  };
-
-  const handleDrop = async (event) => {
-    event.preventDefault();
-    dragDepth.current = 0;
-    setDraggingOver(false);
-
-    const dropped = event.dataTransfer?.files;
-    if (dropped?.length) {
-      await uploadFiles(dropped, 'media_drop_upload', 'drag_drop');
-    }
-  };
-
-  // Dropping a file anywhere outside the drop zone makes the browser open it,
-  // navigating away and losing the page. Swallow those drops.
-  //
-  // The same listeners reset the overlay: a drag that ends outside the window,
-  // or is cancelled with Escape, produces no dragleave on the panel, which
-  // would otherwise leave the overlay stuck over the page.
-  useEffect(() => {
-    const reset = () => {
-      dragDepth.current = 0;
-      setDraggingOver(false);
-    };
-
-    // Only file drags. Dragging selected text into the note textareas relies on
-    // the browser's default drop behaviour, so preventing it unconditionally
-    // would break editing elsewhere on the page.
-    const isFileDrag = (event) => event.dataTransfer?.types?.includes('Files');
-
-    const swallow = (event) => {
-      if (isFileDrag(event)) event.preventDefault();
-    };
-
-    const swallowAndReset = (event) => {
-      if (!isFileDrag(event)) return;
-      event.preventDefault();
-      reset();
-    };
-
-    window.addEventListener('dragover', swallow);
-    window.addEventListener('drop', swallowAndReset);
-    window.addEventListener('dragend', reset);
-
-    return () => {
-      window.removeEventListener('dragover', swallow);
-      window.removeEventListener('drop', swallowAndReset);
-      window.removeEventListener('dragend', reset);
-    };
-  }, []);
-
-  // Set up global paste event listener
-  useEffect(() => {
-    document.addEventListener('paste', handlePaste);
-    return () => document.removeEventListener('paste', handlePaste);
-  }, [handlePaste]);
+  const { dragProps, draggingOver } = useFileDrop(
+    (files) => uploadFiles(files, 'media_drop_upload', 'drag_drop')
+  );
 
   /**
    * Set up real-time listener for media document changes
@@ -453,10 +375,7 @@ const MediaShare = ({ documentId }) => {
   return (
     <div
       className={`${styles.container} ${draggingOver ? styles.dropActive : ''}`}
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+      {...dragProps}
     >
       {draggingOver && (
         <div className={styles.dropOverlay}>

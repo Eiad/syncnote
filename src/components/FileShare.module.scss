@@ -1,4 +1,58 @@
+.dropActive {
+  border-color: #3b82f6;
+}
+
+// The whole panel is the drop target, so the affordance covers all of it.
+.dropOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  border-radius: 0.75rem;
+  border: 2px dashed #3b82f6;
+  background: rgba(239, 246, 255, 0.94);
+  color: #1d4ed8;
+  font-size: 1.125rem;
+  font-weight: 500;
+  font-family: 'Poppins', sans-serif;
+  // A hint, not a target: let drag events reach the container underneath, or
+  // entering it fires dragleave and the overlay flickers away.
+  pointer-events: none;
+}
+
+.dropIcon {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+.uploading {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: #3b82f6;
+  color: white;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 16px;
+  z-index: 1000;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  font-family: 'Poppins', sans-serif;
+}
+
+.instructions {
+  text-align: center;
+  color: #64748b;
+  font-size: 0.875rem;
+  margin-top: 1rem;
+  font-family: 'Poppins', sans-serif;
+}
+
 .container {
+  position: relative;
     background: white;
     border-radius: 0.75rem;
     padding: 1.5rem;

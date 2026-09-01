@@ -2,6 +2,8 @@ import formidable from 'formidable';
 import { requireCaller, sendError } from '@/lib/serverAuth';
 import { cloudinary } from '@/lib/mediaStore';
 
+const ALLOWED_RESOURCE_TYPES = ['auto', 'image', 'raw', 'video'];
+
 export const config = {
   api: {
     bodyParser: false
@@ -22,10 +24,10 @@ export default async function handler(req, res) {
       maxFileSize: 10 * 1024 * 1024 // 10MB
     });
 
-    const [, files] = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, parsedFiles) => {
+    const [fields, files] = await new Promise((resolve, reject) => {
+      form.parse(req, (err, parsedFields, parsedFiles) => {
         if (err) reject(err);
-        else resolve([fields, parsedFiles]);
+        else resolve([parsedFields, parsedFiles]);
       });
     });
 
@@ -35,9 +37,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ message: 'No file provided' });
     }
 
+    // Callers may pin the resource type. Under 'auto' Cloudinary files a PDF as
+    // an image, so documents uploaded here would not match the 'raw' assets the
+    // upload widget produces for the same file.
+    const requested = fields?.resourceType?.[0];
+    const resourceType = ALLOWED_RESOURCE_TYPES.includes(requested) ? requested : 'auto';
+
     const result = await cloudinary.uploader.upload(file.filepath, {
       upload_preset: 'syncnote',
-      resource_type: 'auto'
+      resource_type: resourceType
     });
 
     // The public ID is what Cloudinary deletes by. Returning it here is what
