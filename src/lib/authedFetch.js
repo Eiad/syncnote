@@ -32,6 +32,21 @@ export async function authedFetch(url, body) {
 
   const data = await response.json().catch(() => ({}));
 
+  if (response.status === 401) {
+    // The credential is stale: an expired cookie, or one signed with a session
+    // secret that has since changed. Drop the local session so the next load
+    // goes to the login screen, and say so plainly rather than surfacing a bare
+    // "Not authenticated" from the API.
+    try {
+      localStorage.removeItem('isAshLoggedIn');
+      await fetch('/api/ash-logout', { method: 'POST', credentials: 'same-origin' });
+    } catch {
+      // Clearing the session is best effort; the message below still stands.
+    }
+
+    throw new Error('Your session has expired. Please sign in again.');
+  }
+
   if (!response.ok) {
     throw new Error(data.message || `Request failed (${response.status})`);
   }

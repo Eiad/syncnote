@@ -120,6 +120,9 @@ NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
 - **`media_paste_upload_started`** - Paste upload started
 - **`media_paste_upload_success`** - Paste upload success
 - **`media_paste_upload_error`** - Paste upload error
+- **`media_drop_upload_started`** - Drag-and-drop upload started
+- **`media_drop_upload_success`** - Drag-and-drop upload success
+- **`media_drop_upload_error`** - Drag-and-drop upload error
   - Test: Copy an image and paste it (Ctrl/Cmd + V)
 
 #### Delete Events

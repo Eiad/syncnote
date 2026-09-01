@@ -93,6 +93,9 @@ const AnalyticsDashboard = () => {
                 <li><code>media_paste_upload_started</code> - Paste upload started</li>
                 <li><code>media_paste_upload_success</code> - Paste upload success</li>
                 <li><code>media_paste_upload_error</code> - Paste upload error</li>
+                <li><code>media_drop_upload_started</code> - Drag-and-drop upload started</li>
+                <li><code>media_drop_upload_success</code> - Drag-and-drop upload success</li>
+                <li><code>media_drop_upload_error</code> - Drag-and-drop upload error</li>
                 <li><code>media_delete_all_started</code> - Delete all started</li>
                 <li><code>media_delete_all_success</code> - Delete all success</li>
                 <li><code>media_delete_all_error</code> - Delete all error</li>
