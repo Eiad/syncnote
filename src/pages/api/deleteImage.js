@@ -1,32 +1,53 @@
-import { v2 as cloudinary } from 'cloudinary';
+import { requireUser, HttpError, sendError } from '@/lib/firebaseAdmin';
+import { resolveDoc, readItems, destroyAsset, removeItems } from '@/lib/mediaStore';
+import { matchesTarget } from '@/lib/mediaSchema';
 
-cloudinary.config({
-  cloud_name: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.NEXT_PUBLIC_CLOUDINARY_API_KEY,
-  api_secret: process.env.NEXT_PUBLIC_CLOUDINARY_API_SECRET
-});
-
+/**
+ * Delete a single Cloudinary-backed entry from a user's media or files
+ * document.
+ *
+ * Order matters: Cloudinary first, Firestore second. A hard Cloudinary failure
+ * leaves both sides untouched and the request safely retryable, while an asset
+ * that is already gone still lets the stale record be cleared.
+ */
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ message: 'Method not allowed' });
   }
 
   try {
-    const { publicId } = req.body;
-    
-    if (!publicId) {
-      return res.status(400).json({ message: 'Public ID is required' });
+    const { uid } = await requireUser(req);
+    const { collection, documentId, publicId, url } = req.body || {};
+
+    if (!publicId && !url) {
+      throw new HttpError(400, 'publicId or url is required');
     }
 
-    const result = await cloudinary.uploader.destroy(publicId);
-    
-    if (result.result === 'ok') {
-      res.status(200).json({ message: 'Image deleted successfully' });
-    } else {
-      res.status(400).json({ message: 'Failed to delete image', result });
+    const docRef = resolveDoc(uid, collection, documentId);
+    const snapshot = await docRef.get();
+    const items = readItems(snapshot, collection);
+
+    // Authorization: the entry must exist in this user's own document. The
+    // document path is already scoped to the verified uid, so a caller cannot
+    // name someone else's asset.
+    const target = items.find((item) => matchesTarget(item, { publicId, url }));
+
+    if (!target) {
+      throw new HttpError(404, 'Item not found in this document');
     }
+
+    const outcome = await destroyAsset(target.publicId, target.resourceType);
+
+    const removed = await removeItems(docRef, collection, (item) =>
+      matchesTarget(item, { publicId: target.publicId, url: target.url })
+    );
+
+    return res.status(200).json({
+      message: 'Item deleted',
+      removed,
+      cloudinary: outcome
+    });
   } catch (error) {
-    console.error('Delete error:', error);
-    res.status(500).json({ message: 'Error deleting image', error: error.message });
+    return sendError(res, error, 'Delete error');
   }
-} 
+}

@@ -63,8 +63,7 @@ const Dashboard = () => {
     try {
       // console.log('🔐 Signing out from Firebase...');
       await auth.signOut();
-      localStorage.removeItem('isAshLoggedIn');
-      
+
       // Ensure minimum loading time for better UX
       const elapsedTime = Date.now() - startTime;
       const remainingTime = Math.max(1500 - elapsedTime, 0);

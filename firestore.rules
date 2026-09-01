@@ -2,39 +2,38 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Everything lives under the owning user's tree. The main account signs in
+    // with a custom token whose uid is 'ash', so it is covered by the same
+    // owner check as every other account and needs no carve-out.
     match /users/{userId} {
-      allow create: if request.auth != null && request.auth.uid == userId;
-      allow read, write: if request.auth != null && (request.auth.uid == userId || userId == 'ash');
-      
-      allow create: if request.resource.data.keys().hasAll(['name', 'email', 'createdAt', 'provider']) &&
+      function isOwner() {
+        return request.auth != null && request.auth.uid == userId;
+      }
+
+      allow read, update, delete: if isOwner();
+
+      allow create: if isOwner() &&
+                      request.resource.data.keys().hasAll(['name', 'email', 'createdAt', 'provider']) &&
                       request.resource.data.name is string &&
                       request.resource.data.email is string &&
                       request.resource.data.provider is string;
-      
+
       match /texts/{document=**} {
-        allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
+        allow read, write: if isOwner();
       }
-      
+
       match /quicknotes/{document=**} {
-        allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
+        allow read, write: if isOwner();
       }
-      
+
       match /media/{document=**} {
-        allow read, write: if request.auth != null || request.auth == null;
+        allow read, write: if isOwner();
+      }
+
+      match /files/{document=**} {
+        allow read, write: if isOwner();
       }
     }
-    
-    match /media/{document=**} {
-      allow read, write: if request.auth != null || request.auth == null;
-    }
-
-    match /files/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
-    }  
-
-    match /users/{userId}/files/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId || userId == 'ash';
-    }    
-      
   }
 }

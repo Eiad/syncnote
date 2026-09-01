@@ -47,8 +47,39 @@
 
   .fileDetails {
     display: flex;
-    justify-content: space-between; // Align date and download button
+    justify-content: space-between; // Align date, download and delete
     align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .deleteFileButton {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.5rem 1rem;
+    background: #ef4444;
+    color: white;
+    border: none;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    font-family: 'Poppins', sans-serif;
+    cursor: pointer;
+    transition: all 0.3s ease;
+
+    &:hover {
+      background: #dc2626;
+    }
+
+    &:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+    }
+
+    svg {
+      width: 0.875rem;
+      height: 0.875rem;
+    }
   }
 
   .uploadDate {
