@@ -1,16 +1,20 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { db, logAnalyticsEvent } from '@/lib/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { CldUploadWidget } from 'next-cloudinary';
 import styles from './MediaShare.module.scss';
 import ImageModal from './ImageModal';
 import { useAuth } from '@/contexts/AuthContext';
-import { FiImage, FiTrash2 } from 'react-icons/fi';
+import { FiImage, FiTrash2, FiUploadCloud } from 'react-icons/fi';
 import { authedFetch } from '@/lib/authedFetch';
 import { appendItem, removeItems } from '@/lib/mediaDoc';
 import { itemsFromData, matchesTarget } from '@/lib/mediaSchema';
 
 const CLOUD_NAME = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+
+// Matches the limit enforced by the upload route and the Cloudinary widget.
+// Checking it here turns a server error into an explanatory message.
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 // Stable identity for a stored entry. Legacy records with an underivable public
 // ID fall back to their URL so they can still be selected and removed.
@@ -23,36 +27,69 @@ const MediaShare = ({ documentId }) => {
   const [deleting, setDeleting] = useState(false);
   const [deletingKeys, setDeletingKeys] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
-  const [pasteLoading, setPasteLoading] = useState(false);
+  // { done, total } while an upload batch is in flight, otherwise null.
+  const [uploading, setUploading] = useState(null);
+  const [draggingOver, setDraggingOver] = useState(false);
+
+  // dragenter/dragleave fire for every child element the pointer crosses, so
+  // track nesting depth. Toggling a boolean per event makes the overlay flicker
+  // as the pointer moves over the image grid.
+  const dragDepth = useRef(0);
 
   /**
-   * Handle paste operations for image uploads
-   * Tracks paste upload attempts, success, and errors
-   * Supports drag-and-drop and clipboard paste functionality
+   * Upload image files and record each one.
+   *
+   * Shared by the clipboard and drag-and-drop paths so both behave identically
+   * and stay in sync. `eventPrefix` keeps their analytics events distinct.
+   *
+   * @param {FileList|File[]} fileList - Candidate files.
+   * @param {string} eventPrefix - 'media_paste_upload' or 'media_drop_upload'.
+   * @param {string} method - Value recorded as upload_method.
    */
-  const handlePaste = useCallback(async (event) => {
-    const clipboardItems = event.clipboardData?.items;
-    if (!clipboardItems || !user) return;
+  const uploadFiles = useCallback(async (fileList, eventPrefix, method) => {
+    if (!user) return;
 
-    for (const clipboardItem of clipboardItems) {
-      if (clipboardItem.type.indexOf('image') === 0) {
-        const file = clipboardItem.getAsFile();
-        if (!file) continue;
+    const files = Array.from(fileList || []);
+    const images = files.filter((file) => file.type.startsWith('image/'));
+    const accepted = images.filter((file) => file.size <= MAX_FILE_SIZE);
 
-        setPasteLoading(true);
-        const formData = new FormData();
-        formData.append('file', file);
+    // Explain anything dropped that we are not going to upload, rather than
+    // silently ignoring it or letting the request fail server-side.
+    const problems = [];
+    if (files.length - images.length > 0) {
+      problems.push(`${files.length - images.length} file(s) skipped - images only`);
+    }
+    if (images.length - accepted.length > 0) {
+      problems.push(`${images.length - accepted.length} file(s) skipped - over 10MB`);
+    }
+    setError(problems.length ? problems.join('. ') : null);
 
-        // Track paste upload attempts to understand user behavior
-        logAnalyticsEvent('media_paste_upload_started', {
+    if (!accepted.length) return;
+
+    setUploading({ done: 0, total: accepted.length });
+    const failures = [];
+
+    try {
+      for (const [index, file] of accepted.entries()) {
+        setUploading({ done: index, total: accepted.length });
+
+        // Track upload attempts to understand user behavior
+        logAnalyticsEvent(`${eventPrefix}_started`, {
           file_size: file.size,               // File size in bytes for performance analysis
           file_type: file.type,               // MIME type (e.g., 'image/jpeg')
           user_id: user.uid,                  // User identifier
-          document_id: documentId             // Which document receives the upload
+          document_id: documentId,            // Which document receives the upload
+          upload_method: method               // 'paste' or 'drag_drop'
         });
 
+        let uploaded = null;
+
         try {
-          const data = await authedFetch('/api/uploadImage', formData);
+          const formData = new FormData();
+          formData.append('file', file);
+
+          uploaded = await authedFetch('/api/uploadImage', formData);
+          const data = uploaded;
 
           const docRef = doc(db, `users/${user.uid}/media`, documentId);
           const total = await appendItem(docRef, 'media', {
@@ -63,31 +100,142 @@ const MediaShare = ({ documentId }) => {
             uploadedAt: Date.now()
           });
 
-          // Track successful paste uploads for feature usage analysis
-          logAnalyticsEvent('media_paste_upload_success', {
+          // Track successful uploads for feature usage analysis
+          logAnalyticsEvent(`${eventPrefix}_success`, {
             file_size: file.size,              // File size for performance tracking
             file_type: file.type,              // File type for format analysis
             user_id: user.uid,                 // User identifier
             document_id: documentId,           // Target document
-            total_images: total                // Total images in collection
+            total_images: total,               // Total images in collection
+            upload_method: method              // 'paste' or 'drag_drop'
           });
         } catch (err) {
-          setError('Error uploading pasted image: ' + err.message);
+          // The asset can reach Cloudinary and still fail to be recorded. Undo
+          // the upload rather than leaving an asset nothing references, which is
+          // exactly the orphan this feature exists to prevent.
+          if (uploaded?.public_id) {
+            await authedFetch('/api/deleteImage', {
+              publicId: uploaded.public_id,
+              resourceType: uploaded.resource_type
+            }).catch(() => {
+              // Nothing more to try; the message below still reports the failure.
+            });
+          }
 
-          // Track paste upload errors to identify upload issues
-          logAnalyticsEvent('media_paste_upload_error', {
+          // One bad file must not abandon the rest of the batch. Collect the
+          // failures so a later one cannot hide an earlier one.
+          failures.push(`${file.name || 'image'}: ${err.message}`);
+
+          // Track upload errors to identify upload issues
+          logAnalyticsEvent(`${eventPrefix}_error`, {
             error_message: err.message,        // Specific error message
             file_size: file.size,              // File size that failed
             file_type: file.type,              // File type that failed
             user_id: user.uid,                 // User identifier for support
-            document_id: documentId            // Target document
+            document_id: documentId,           // Target document
+            upload_method: method              // 'paste' or 'drag_drop'
           });
-        } finally {
-          setPasteLoading(false);
         }
+      }
+    } finally {
+      setUploading(null);
+
+      if (failures.length === 1) {
+        setError([...problems, `Error uploading ${failures[0]}`].join('. '));
+      } else if (failures.length > 1) {
+        setError([...problems, `${failures.length} uploads failed - ${failures.join('; ')}`].join('. '));
       }
     }
   }, [user, documentId]);
+
+  /**
+   * Handle paste operations for image uploads
+   * Supports pasting screenshots and copied images straight into the page
+   */
+  const handlePaste = useCallback(async (event) => {
+    const clipboardItems = event.clipboardData?.items;
+    if (!clipboardItems || !user) return;
+
+    const files = Array.from(clipboardItems)
+      .filter((clipboardItem) => clipboardItem.type.indexOf('image') === 0)
+      .map((clipboardItem) => clipboardItem.getAsFile())
+      .filter(Boolean);
+
+    if (files.length) {
+      await uploadFiles(files, 'media_paste_upload', 'paste');
+    }
+  }, [user, uploadFiles]);
+
+  /* ----------------------------------------------------------- drag and drop */
+
+  const handleDragEnter = (event) => {
+    if (!event.dataTransfer?.types?.includes('Files')) return;
+    event.preventDefault();
+    dragDepth.current += 1;
+    setDraggingOver(true);
+  };
+
+  // Without preventDefault on dragover the drop event never fires and the
+  // browser navigates to the dropped file instead.
+  const handleDragOver = (event) => {
+    if (!event.dataTransfer?.types?.includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleDragLeave = () => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDraggingOver(false);
+  };
+
+  const handleDrop = async (event) => {
+    event.preventDefault();
+    dragDepth.current = 0;
+    setDraggingOver(false);
+
+    const dropped = event.dataTransfer?.files;
+    if (dropped?.length) {
+      await uploadFiles(dropped, 'media_drop_upload', 'drag_drop');
+    }
+  };
+
+  // Dropping a file anywhere outside the drop zone makes the browser open it,
+  // navigating away and losing the page. Swallow those drops.
+  //
+  // The same listeners reset the overlay: a drag that ends outside the window,
+  // or is cancelled with Escape, produces no dragleave on the panel, which
+  // would otherwise leave the overlay stuck over the page.
+  useEffect(() => {
+    const reset = () => {
+      dragDepth.current = 0;
+      setDraggingOver(false);
+    };
+
+    // Only file drags. Dragging selected text into the note textareas relies on
+    // the browser's default drop behaviour, so preventing it unconditionally
+    // would break editing elsewhere on the page.
+    const isFileDrag = (event) => event.dataTransfer?.types?.includes('Files');
+
+    const swallow = (event) => {
+      if (isFileDrag(event)) event.preventDefault();
+    };
+
+    const swallowAndReset = (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      reset();
+    };
+
+    window.addEventListener('dragover', swallow);
+    window.addEventListener('drop', swallowAndReset);
+    window.addEventListener('dragend', reset);
+
+    return () => {
+      window.removeEventListener('dragover', swallow);
+      window.removeEventListener('drop', swallowAndReset);
+      window.removeEventListener('dragend', reset);
+    };
+  }, []);
 
   // Set up global paste event listener
   useEffect(() => {
@@ -303,7 +451,20 @@ const MediaShare = ({ documentId }) => {
   };
 
   return (
-    <div className={styles.container}>
+    <div
+      className={`${styles.container} ${draggingOver ? styles.dropActive : ''}`}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {draggingOver && (
+        <div className={styles.dropOverlay}>
+          <FiUploadCloud className={styles.dropIcon} />
+          <span>Drop images here</span>
+        </div>
+      )}
+
       {items.length > 0 && (
         <div className={styles.header}>
 
@@ -319,9 +480,11 @@ const MediaShare = ({ documentId }) => {
         </div>
       )}
 
-      {pasteLoading && (
+      {uploading && (
         <div className={styles.loading}>
-          Uploading image...
+          {uploading.total > 1
+            ? `Uploading ${uploading.done + 1} of ${uploading.total}...`
+            : 'Uploading image...'}
         </div>
       )}
 
@@ -419,7 +582,7 @@ const MediaShare = ({ documentId }) => {
 
       {error && <div className={styles.error}>{error}</div>}
       <div className={styles.instructions}>
-        You can also paste images directly (Ctrl/Cmd + V)
+        You can also drag &amp; drop images here, or paste them (Ctrl/Cmd + V)
       </div>
     </div>
   );
