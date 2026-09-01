@@ -4,7 +4,7 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { CldUploadWidget } from 'next-cloudinary';
 import styles from './FileShare.module.scss';
 import { useAuth } from '@/contexts/AuthContext';
-import { FiUpload, FiTrash2, FiFileText, FiUploadCloud } from 'react-icons/fi';
+import { FiUpload, FiTrash2, FiUploadCloud } from 'react-icons/fi';
 import { authedFetch } from '@/lib/authedFetch';
 import { appendItem, removeItems } from '@/lib/mediaDoc';
 import { itemsFromData, matchesTarget } from '@/lib/mediaSchema';
@@ -25,6 +25,45 @@ const extensionOf = (name) => (name || '').split('.').pop().toLowerCase();
 const itemKey = (item) => item.publicId || item.url;
 
 const fileName = (item) => item.name || decodeURIComponent(item.url.split('/').pop());
+
+const fileExtension = (item) => extensionOf(fileName(item)).toUpperCase() || 'FILE';
+
+/**
+ * Human-readable size. Older records predate size being stored, so they get no
+ * size rather than a fabricated one.
+ */
+const formatSize = (bytes) => {
+  if (typeof bytes !== 'number' || bytes <= 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+/**
+ * Relative time for recent uploads, which is what you actually want when
+ * checking whether the file you just sent arrived. Falls back to the stored
+ * locale string for records saved before uploadedAt existed.
+ */
+const formatWhen = (item) => {
+  if (typeof item.uploadedAt !== 'number') return item.date || null;
+
+  const seconds = Math.round((Date.now() - item.uploadedAt) / 1000);
+  if (seconds < 60) return 'just now';
+
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} day${days === 1 ? '' : 's'} ago`;
+
+  return new Date(item.uploadedAt).toLocaleDateString();
+};
+
+const exactWhen = (item) =>
+  typeof item.uploadedAt === 'number' ? new Date(item.uploadedAt).toLocaleString() : item.date || '';
 
 const FileShare = ({ documentId }) => {
     const { user } = useAuth();
@@ -97,6 +136,7 @@ const FileShare = ({ documentId }) => {
                         publicId: uploaded.public_id,
                         resourceType: uploaded.resource_type || 'raw',
                         name: file.name,
+                        bytes: uploaded.bytes,
                         date: new Date().toLocaleString(),
                         uploadedAt: Date.now()
                     });
@@ -135,6 +175,7 @@ const FileShare = ({ documentId }) => {
                 // Persisting the public ID is what makes deletion reliable later.
                 publicId: result.info.public_id,
                 resourceType: result.info.resource_type || 'raw',
+                bytes: result.info.bytes,
                 name: result.info.original_filename
                     ? `${result.info.original_filename}.${result.info.format || ''}`.replace(/\.$/, '')
                     : null,
@@ -277,21 +318,38 @@ const FileShare = ({ documentId }) => {
                     </CldUploadWidget>
 
 
-                    <div className={styles.fileGrid}>
+                    <ul className={styles.fileList}>
                         {items.map((item, index) => {
                             const key = itemKey(item);
                             const isDeleting = deletingKeys.includes(key);
+                            const name = fileName(item);
+                            const size = formatSize(item.bytes);
+                            const when = formatWhen(item);
 
                             return (
-                                <div key={key || index} className={styles.fileItem}>
-                                    <div className={styles.fileTitle}>
-                                        <FiFileText className={styles.fileIcon} />
-                                        <a href={item.url} target="_blank" rel="noopener noreferrer" className={styles.fileLink}>
-                                            {fileName(item)}
+                                <li key={key || index} className={styles.fileItem}>
+                                    <span className={styles.fileType} aria-hidden="true">
+                                        {fileExtension(item)}
+                                    </span>
+
+                                    <div className={styles.fileInfo}>
+                                        <a
+                                            href={item.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className={styles.fileLink}
+                                            title={name}
+                                        >
+                                            {name}
                                         </a>
+                                        {(size || when) && (
+                                            <span className={styles.fileMeta} title={exactWhen(item)}>
+                                                {[size, when].filter(Boolean).join(' \u00b7 ')}
+                                            </span>
+                                        )}
                                     </div>
-                                    <div className={styles.fileDetails}>
-                                        <span className={styles.uploadDate}>{item.date}</span>
+
+                                    <div className={styles.fileActions}>
                                         <a href={item.url} download className={styles.downloadButton}>
                                             Download
                                         </a>
@@ -299,17 +357,16 @@ const FileShare = ({ documentId }) => {
                                             className={styles.deleteFileButton}
                                             onClick={() => handleDeleteItem(item)}
                                             disabled={isDeleting || deleting}
-                                            title="Delete this file"
-                                            aria-label={`Delete ${fileName(item)}`}
+                                            title={`Delete ${name}`}
+                                            aria-label={`Delete ${name}`}
                                         >
                                             <FiTrash2 />
-                                            {isDeleting ? 'Deleting...' : 'Delete'}
                                         </button>
                                     </div>
-                                </div>
+                                </li>
                             );
                         })}
-                    </div>
+                    </ul>
                     {error && <div className={styles.error}>{error}</div>}
                     <div className={styles.instructions}>
                         You can also drag &amp; drop files here ({ALLOWED_EXTENSIONS.join(', ')})
