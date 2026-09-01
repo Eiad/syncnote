@@ -1,0 +1,54 @@
+{
+  "model": "gemini-flash-latest",
+  "base": "main",
+  "contextFiles": ["README.md", "firestore.rules"],
+  "knownFailurePatterns": [
+    "Cloudinary assets orphaned because the public_id was never persisted and had to be reverse-engineered from the delivery URL.",
+    "A delete loop that throws on the first failure, skipping the Firestore write and leaving records that can never be cleared.",
+    "cloudinary.uploader.destroy returning 'not found' treated as an error, making an already-deleted asset permanently unclearable.",
+    "destroy() called without resource_type, which defaults to 'image' and silently fails for raw and video assets.",
+    "API routes that mutate Cloudinary or Firestore without verifying the caller's Firebase ID token.",
+    "Firestore rules written as `request.auth != null || request.auth == null`, which is unconditionally true.",
+    "Firestore rules relying on `A && B || C` precedence, which grants access on C alone.",
+    "Server secrets stored in NEXT_PUBLIC_ variables, which Next.js inlines into the client bundle on any client-side reference.",
+    "Read-modify-write with getDoc followed by setDoc, which drops entries when concurrent upload callbacks race."
+  ],
+  "invariants": [
+    {
+      "id": "no-public-secrets",
+      "severity": "critical",
+      "type": "forbidden",
+      "description": "Secrets must not live in NEXT_PUBLIC_ variables",
+      "why": "Next.js inlines every NEXT_PUBLIC_ variable into the client bundle as soon as anything client-side references it.",
+      "pattern": "NEXT_PUBLIC_[A-Z_]*(SECRET|PASSWORD|PRIVATE_KEY)",
+      "paths": ["src/**/*.js", "src/**/*.jsx"]
+    },
+    {
+      "id": "authenticated-mutations",
+      "severity": "critical",
+      "type": "required",
+      "description": "Upload and delete routes must verify the caller's ID token",
+      "why": "These routes mutate Cloudinary and Firestore; unauthenticated access lets anyone destroy the account's assets.",
+      "pattern": "requireUser",
+      "paths": ["src/pages/api/delete*.js", "src/pages/api/upload*.js"]
+    },
+    {
+      "id": "no-tautological-firestore-rules",
+      "severity": "critical",
+      "type": "forbidden",
+      "description": "Firestore rules must not contain always-true auth conditions",
+      "why": "`request.auth != null || request.auth == null` is unconditionally true and exposes the collection to everyone.",
+      "pattern": "request\\.auth == null",
+      "paths": ["firestore.rules"]
+    },
+    {
+      "id": "destroy-with-resource-type",
+      "severity": "high",
+      "type": "required",
+      "description": "Cloudinary destroy calls must pass resource_type",
+      "why": "destroy() defaults to resource_type 'image', so raw and video assets are silently never deleted.",
+      "pattern": "resource_type",
+      "paths": ["src/lib/mediaStore.js"]
+    }
+  ]
+}
